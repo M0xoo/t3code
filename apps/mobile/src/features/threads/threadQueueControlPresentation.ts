@@ -7,6 +7,10 @@ export const REMOVE_QUEUED_MESSAGE_ACCESSIBILITY_LABEL = "Remove queued message"
 export interface ThreadQueueRowControls {
   readonly canDismiss: boolean;
   readonly canEdit: boolean;
+  readonly canMoveDown: boolean;
+  readonly canMoveUp: boolean;
+  /** Moving only makes sense with two or more queued messages. */
+  readonly showMove: boolean;
   readonly canSend: boolean;
   readonly dismissAccessibilityLabel: string;
   readonly displayText: string;
@@ -22,8 +26,13 @@ export function resolveThreadQueueRowControls(input: {
   readonly isEditing?: boolean;
   /** A guest's message keeps the guest's words; the owner can cancel it, not rewrite it. */
   readonly isGuestMessage?: boolean;
+  /** Where the row sits in the visible queue, and how many rows it has. */
+  readonly position?: number;
+  readonly queuedCount?: number;
   readonly text: string;
 }): ThreadQueueRowControls {
+  const position = input.position ?? 0;
+  const queuedCount = input.queuedCount ?? 1;
   const mutationEnabled = !input.busy;
   const isEditing = input.isEditing === true;
 
@@ -33,6 +42,9 @@ export function resolveThreadQueueRowControls(input: {
     // away whatever has been typed since.
     canEdit:
       mutationEnabled && !isEditing && input.isGuestMessage !== true && input.editBlocked !== true,
+    canMoveDown: mutationEnabled && position < queuedCount - 1,
+    canMoveUp: mutationEnabled && position > 0,
+    showMove: queuedCount > 1,
     canSend: mutationEnabled && (input.canPromoteToSteer || input.canSendNow) && !isEditing,
     dismissAccessibilityLabel: REMOVE_QUEUED_MESSAGE_ACCESSIBILITY_LABEL,
     // Editing and sending keep the original text so quoted citations stay linked.

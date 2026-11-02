@@ -1,5 +1,14 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import { deriveThreadQueueWorkflowState } from "@t3tools/client-runtime/state/thread-workflows";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import {
+  applyQueuedRunMove,
+  deriveThreadQueueWorkflowState,
+  queuedRunMoveTarget,
+  type QueuedRunMoveDirection,
+} from "@t3tools/client-runtime/state/thread-workflows";
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
 import {
   isAttachmentOnlyBootstrapPrompt,
@@ -18,6 +27,7 @@ import {
   ArrowUpIcon,
   CalendarClockIcon,
   ChevronDownIcon,
+  ChevronUpIcon,
   Clock3Icon,
   MessagesSquareIcon,
   PencilIcon,
@@ -33,6 +43,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { isImageAttachment, type ChatMessage } from "../../types";
 import { cn } from "~/lib/utils";
 import { Button, InlineButton } from "../ui/button";
+import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { TimestampFormat } from "@t3tools/contracts/settings";
 import { GuestMessageName } from "./guestMessageStyle";
@@ -99,6 +110,12 @@ export function QueuedRunsControl({
   const promote = useAtomCommand(threadEnvironment.promoteQueuedRun);
   const resume = useAtomCommand(threadEnvironment.resumeThreadQueue);
   const cancel = useAtomCommand(threadEnvironment.cancelQueuedRun);
+  const reorder = useAtomCommand(threadEnvironment.reorderQueuedRun);
+  // The order a move produces, shown until the server's queue order changes or the move fails.
+  const [movedOrder, setMovedOrder] = useState<{
+    readonly serverOrder: string;
+    readonly order: ReadonlyArray<RunId>;
+  } | null>(null);
   const [showAll, setShowAll] = useState(false);
   const queueListId = useId();
   const [busyRunId, setBusyRunId] = useState<RunId | null>(null);
@@ -111,7 +128,16 @@ export function QueuedRunsControl({
     queuedImageAttachmentResources,
   );
   const workflow = projection ? deriveThreadQueueWorkflowState(projection) : null;
-  const queued = workflow?.queuedRuns ?? [];
+  const serverQueued = workflow?.queuedRuns ?? [];
+  const serverOrder = serverQueued.map(({ run }) => run.id).join(" ");
+  const shownOrder = movedOrder?.serverOrder === serverOrder ? movedOrder.order : null;
+  const queued =
+    shownOrder === null
+      ? serverQueued
+      : serverQueued.toSorted(
+          (left, right) => shownOrder.indexOf(left.run.id) - shownOrder.indexOf(right.run.id),
+        );
+  const queuedRunIds = queued.map(({ run }) => run.id);
   const activeRun = workflow?.activeRun ?? null;
   const canSend = workflow?.canSendNow === true || workflow?.canPromoteToSteer === true;
   const queuedImageUrlById = new Map(
@@ -225,6 +251,32 @@ export function QueuedRunsControl({
     setBusyRunId(null);
   };
 
+  const move = async (runId: RunId, direction: QueuedRunMoveDirection) => {
+    const target = queuedRunMoveTarget(queuedRunIds, runId, direction);
+    if (target === null) return;
+    // Keep the moved message in view when it crosses the collapsed queue's edge.
+    setShowAll(true);
+    setMovedOrder({
+      serverOrder,
+      order: applyQueuedRunMove(queuedRunIds, runId, target.beforeRunId),
+    });
+    const result = await reorder({
+      environmentId: props.environmentId,
+      input: { threadId: props.threadId, runId, beforeRunId: target.beforeRunId },
+    });
+    if (result._tag === "Failure") {
+      setMovedOrder(null);
+      if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add({
+          type: "error",
+          title: "Could not move the queued message",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        });
+      }
+    }
+  };
+
   const collapsible = items.length > QUEUE_VISIBLE_ROWS;
   const visibleItems = collapsible && !showAll ? items.slice(0, QUEUE_VISIBLE_ROWS - 1) : items;
 
@@ -310,6 +362,24 @@ export function QueuedRunsControl({
                   </>
                 ) : (
                   <>
+                    {item.runId !== null && queued.length > 1 ? (
+                      <>
+                        <QueuedMoveButton
+                          direction="up"
+                          disabled={busyRunId !== null || item.serverIndex === 0}
+                          onMove={() => {
+                            if (item.runId !== null) void move(item.runId, "up");
+                          }}
+                        />
+                        <QueuedMoveButton
+                          direction="down"
+                          disabled={busyRunId !== null || item.serverIndex === queued.length - 1}
+                          onMove={() => {
+                            if (item.runId !== null) void move(item.runId, "down");
+                          }}
+                        />
+                      </>
+                    ) : null}
                     <Tooltip>
                       {/* The span keeps the tooltip, and its reason, on a disabled button. */}
                       <TooltipTrigger render={<span className="flex shrink-0" />}>
@@ -389,6 +459,34 @@ export function QueuedRunsControl({
         </div>
       ) : null}
     </section>
+  );
+}
+
+function QueuedMoveButton(props: {
+  readonly direction: QueuedRunMoveDirection;
+  readonly disabled: boolean;
+  readonly onMove: () => void;
+}) {
+  const label = props.direction === "up" ? "Move up" : "Move down";
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            size="icon-xs"
+            variant="ghost-muted"
+            aria-label={`${label} in queue`}
+            disabled={props.disabled}
+            onClick={() => {
+              props.onMove();
+            }}
+          />
+        }
+      >
+        {props.direction === "up" ? <ChevronUpIcon /> : <ChevronDownIcon />}
+      </TooltipTrigger>
+      <TooltipPopup>{label}</TooltipPopup>
+    </Tooltip>
   );
 }
 

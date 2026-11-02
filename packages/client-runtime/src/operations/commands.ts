@@ -248,6 +248,12 @@ export interface CancelQueuedRunInput extends ThreadCommandInput {
   readonly runId: RunId;
 }
 
+export interface ReorderQueuedRunInput extends ThreadCommandInput {
+  readonly runId: RunId;
+  /** The queued run this one moves in front of; null moves it to the end. */
+  readonly beforeRunId: RunId | null;
+}
+
 export interface RetryWorkspacePreparationInput extends ThreadCommandInput {
   readonly runId: RunId;
 }
@@ -1054,6 +1060,18 @@ export const cancelQueuedRun = Effect.fn("EnvironmentCommands.cancelQueuedRun")(
     commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
     runId: input.runId,
+  });
+});
+
+export const reorderQueuedRun = Effect.fn("EnvironmentCommands.reorderQueuedRun")(function* (
+  input: ReorderQueuedRunInput,
+) {
+  return yield* dispatch({
+    type: "queued-run.reorder",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    runId: input.runId,
+    beforeRunId: input.beforeRunId,
   });
 });
 

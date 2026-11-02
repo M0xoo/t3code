@@ -2,8 +2,10 @@ import { describe, expect, it } from "vite-plus/test";
 import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 
 import {
+  applyQueuedRunMove,
   canForkProjectedAssistantItem,
   deriveThreadQueueWorkflowState,
+  queuedRunMoveTarget,
   resolveLatestMergeBackRun,
   threadSupportsProviderHandoff,
 } from "./threadWorkflows.ts";
@@ -399,4 +401,43 @@ describe("thread workflows", () => {
       expect(resolveLatestMergeBackRun(projection)).toBeNull();
     },
   );
+});
+
+describe("queued message moves", () => {
+  const ids = ["a", "b", "c", "d"] as never as ReadonlyArray<never>;
+  const target = (id: string, direction: "up" | "down") =>
+    queuedRunMoveTarget(ids, id as never, direction);
+
+  it("moves up in front of the previous message and stops at the top", () => {
+    expect(target("c", "up")).toEqual({ beforeRunId: "b" });
+    expect(target("b", "up")).toEqual({ beforeRunId: "a" });
+    expect(target("a", "up")).toBeNull();
+  });
+
+  it("moves down in front of the message after next, or to the end", () => {
+    expect(target("a", "down")).toEqual({ beforeRunId: "c" });
+    expect(target("c", "down")).toEqual({ beforeRunId: null });
+    expect(target("d", "down")).toBeNull();
+  });
+
+  it("returns null for a run that is not in the visible queue", () => {
+    expect(target("z", "up")).toBeNull();
+    expect(target("z", "down")).toBeNull();
+  });
+
+  it("applies a move the same way the server orders the queue", () => {
+    const order = ["a", "b", "c", "d"];
+    expect(applyQueuedRunMove(order, "c", "a")).toEqual(["c", "a", "b", "d"]);
+    expect(applyQueuedRunMove(order, "a", "c")).toEqual(["b", "a", "c", "d"]);
+    expect(applyQueuedRunMove(order, "b", null)).toEqual(["a", "c", "d", "b"]);
+    expect(applyQueuedRunMove(order, "z", "a")).toBe(order);
+    for (const id of order) {
+      for (const direction of ["up", "down"] as const) {
+        const move = queuedRunMoveTarget(order as never, id as never, direction);
+        if (move === null) continue;
+        const next = applyQueuedRunMove(order, id, move.beforeRunId as string | null);
+        expect(next.indexOf(id) - order.indexOf(id)).toBe(direction === "up" ? -1 : 1);
+      }
+    }
+  });
 });

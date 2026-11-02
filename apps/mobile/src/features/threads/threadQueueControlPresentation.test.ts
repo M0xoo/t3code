@@ -74,4 +74,30 @@ describe("threadQueueControlPresentation", () => {
     expect(guest.canEdit).toBe(false);
     expect(guest.canDismiss).toBe(true);
   });
+
+  it("offers moves only within the queue's ends and while nothing is in flight", () => {
+    const row = (position: number, busy = false) =>
+      resolveThreadQueueRowControls({
+        busy,
+        canPromoteToSteer: true,
+        canSendNow: false,
+        position,
+        queuedCount: 3,
+        text: "Queued message",
+      });
+
+    expect([row(0).canMoveUp, row(0).canMoveDown]).toEqual([false, true]);
+    expect([row(1).canMoveUp, row(1).canMoveDown]).toEqual([true, true]);
+    expect([row(2).canMoveUp, row(2).canMoveDown]).toEqual([true, false]);
+    expect([row(1, true).canMoveUp, row(1, true).canMoveDown]).toEqual([false, false]);
+    expect(row(0).showMove).toBe(true);
+    expect(
+      resolveThreadQueueRowControls({
+        busy: false,
+        canPromoteToSteer: true,
+        canSendNow: false,
+        text: "Only message",
+      }).showMove,
+    ).toBe(false);
+  });
 });

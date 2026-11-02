@@ -128,6 +128,41 @@ export function getUserQueuedThreadRuns(
   );
 }
 
+export type QueuedRunMoveDirection = "up" | "down";
+
+/**
+ * The `queued-run.reorder` target that moves a queued message one place, or null at either end.
+ * `runIds` is the visible queue (`queuedRuns`), which already leaves out automatic deliveries.
+ */
+export function queuedRunMoveTarget(
+  runIds: ReadonlyArray<Run["id"]>,
+  runId: Run["id"],
+  direction: QueuedRunMoveDirection,
+): { readonly beforeRunId: Run["id"] | null } | null {
+  const index = runIds.indexOf(runId);
+  if (index === -1) return null;
+  if (direction === "up") {
+    const previous = runIds[index - 1];
+    return previous === undefined ? null : { beforeRunId: previous };
+  }
+  if (index === runIds.length - 1) return null;
+  return { beforeRunId: runIds[index + 2] ?? null };
+}
+
+/** The queue order a reorder produces, for showing it before the server confirms. */
+export function applyQueuedRunMove<Id>(
+  runIds: ReadonlyArray<Id>,
+  runId: Id,
+  beforeRunId: Id | null,
+): ReadonlyArray<Id> {
+  if (!runIds.includes(runId)) return runIds;
+  const without = runIds.filter((id) => id !== runId);
+  const index = beforeRunId === null ? -1 : without.indexOf(beforeRunId);
+  return index === -1
+    ? [...without, runId]
+    : [...without.slice(0, index), runId, ...without.slice(index)];
+}
+
 export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQueueWorkflowState {
   const activeRun = resolveActiveThreadRun(projection);
   const session = resolveThreadProviderSession(projection);

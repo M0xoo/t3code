@@ -1,5 +1,6 @@
 import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import { serializeAssistantCitation } from "@t3tools/shared/assistantCitations";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import type { ComponentProps } from "react";
 import { expect, it, vi } from "vite-plus/test";
@@ -8,6 +9,10 @@ import { page } from "vite-plus/test/browser";
 const state = vi.hoisted(() => ({
   projection: null as unknown,
   workflow: null as unknown,
+  command: (async () => ({ _tag: "Success", value: undefined })) as (
+    value: unknown,
+  ) => Promise<unknown>,
+  toast: null as unknown as (toast: unknown) => void,
 }));
 
 vi.mock(import("@t3tools/client-runtime/state/thread-workflows"), async (importOriginal) => ({
@@ -31,8 +36,22 @@ vi.mock(import("../../state/query"), async (importOriginal) => ({
 
 vi.mock(import("../../state/use-atom-command"), async (importOriginal) => ({
   ...(await importOriginal()),
-  useAtomCommand: (() => async () => undefined) as never,
+  useAtomCommand: (() => (value: unknown) => state.command(value)) as never,
 }));
+
+vi.mock(import("../ui/toast"), async (importOriginal) => {
+  const original = await importOriginal();
+  return {
+    ...original,
+    toastManager: {
+      ...original.toastManager,
+      add: ((toast: unknown) => {
+        state.toast(toast);
+        return "toast";
+      }) as never,
+    },
+  };
+});
 
 vi.mock(import("../../assets/assetUrls"), async (importOriginal) => ({
   ...(await importOriginal()),
@@ -47,6 +66,8 @@ import { QueuedRunsControl } from "./QueuedRunsControl";
 function setup() {
   state.projection = null;
   state.workflow = null;
+  state.command = async () => ({ _tag: "Success", value: undefined });
+  state.toast = () => undefined;
 }
 
 const baseProps = {
@@ -202,4 +223,86 @@ it("stays inside the timeline scroller instead of growing the chat column", asyn
   await expect.element(page.getByText("Later", { exact: true })).toBeInTheDocument();
   const column = screen.getByTestId("column").element();
   expect(column.scrollHeight).toBe(column.clientHeight);
+});
+
+function threeQueued() {
+  state.projection = { projection: { messages: [] } };
+  state.workflow = {
+    activeRun: { id: "run:active" },
+    canPromoteToSteer: true,
+    queuedRuns: ["first", "second", "third"].map((name) => ({
+      run: { id: `run:${name}`, userMessageId: `message:${name}` },
+      text: `${name} follow-up`,
+      attachments: [],
+    })),
+  };
+}
+
+async function shownOrder() {
+  const rows = await page.getByRole("listitem").all();
+  return rows.map((row) => row.element().textContent?.match(/(\w+) follow-up/)?.[1]);
+}
+
+it("moves a queued message up or down at once and sends the reorder", async () => {
+  setup();
+  threeQueued();
+  const command = vi.fn(async (_value: unknown) => ({ _tag: "Success", value: undefined }));
+  state.command = command;
+  await using _screen = await renderQueue();
+
+  const up = page.getByRole("button", { name: "Move up in queue", exact: true });
+  const down = page.getByRole("button", { name: "Move down in queue", exact: true });
+  await expect.element(up.nth(0)).toBeDisabled();
+  await expect.element(down.nth(2)).toBeDisabled();
+
+  await up.nth(2).click();
+  expect(command).toHaveBeenLastCalledWith({
+    environmentId: "environment:test",
+    input: { threadId: "thread:test", runId: "run:third", beforeRunId: "run:second" },
+  });
+  await expect.poll(shownOrder).toEqual(["first", "third", "second"]);
+
+  await down.nth(0).click();
+  expect(command).toHaveBeenLastCalledWith({
+    environmentId: "environment:test",
+    input: { threadId: "thread:test", runId: "run:first", beforeRunId: "run:second" },
+  });
+  await expect.poll(shownOrder).toEqual(["third", "first", "second"]);
+});
+
+it("puts a refused move back and says why", async () => {
+  setup();
+  threeQueued();
+  state.command = async () => ({
+    _tag: "Failure",
+    cause: Cause.fail(new Error("Run run:second is not queued.")),
+  });
+  const toast = vi.fn();
+  state.toast = toast;
+  await using _screen = await renderQueue();
+
+  await page.getByRole("button", { name: "Move down in queue", exact: true }).nth(1).click();
+  await expect.poll(shownOrder).toEqual(["first", "second", "third"]);
+  expect(toast).toHaveBeenCalledWith(
+    expect.objectContaining({
+      type: "error",
+      title: "Could not move the queued message",
+      description: "Run run:second is not queued.",
+    }),
+  );
+});
+
+it("offers no moves for a single queued message", async () => {
+  setup();
+  threeQueued();
+  const workflow = state.workflow as { queuedRuns: ReadonlyArray<unknown> };
+  state.workflow = { ...workflow, queuedRuns: workflow.queuedRuns.slice(0, 1) };
+  await using _screen = await renderQueue();
+
+  await expect
+    .element(page.getByRole("button", { name: "Edit queued message", exact: true }))
+    .toBeVisible();
+  await expect
+    .element(page.getByRole("button", { name: "Move up in queue", exact: true }))
+    .not.toBeInTheDocument();
 });

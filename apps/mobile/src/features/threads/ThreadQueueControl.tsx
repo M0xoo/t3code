@@ -5,6 +5,14 @@ import {
   queuedRunEditBlockedReason,
 } from "@t3tools/client-runtime/queued-run-edit";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import {
+  applyQueuedRunMove,
+  queuedRunMoveTarget,
+} from "@t3tools/client-runtime/state/thread-workflows";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import type { ChatAttachment, EnvironmentId, RunId, ThreadId } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
@@ -51,7 +59,7 @@ const EMPTY_QUEUED_COUNT_ATOM = Atom.make(0).pipe(
 );
 
 type QueueTarget = { readonly environmentId: EnvironmentId; readonly threadId: ThreadId };
-type QueueAction = "steer" | "edit" | "remove";
+type QueueAction = "steer" | "edit" | "remove" | "up" | "down";
 
 function useThreadQueueWorkflow(target: QueueTarget) {
   return useAtomValue(environmentThreadDetails.queueWorkflowAtom(target));
@@ -135,10 +143,25 @@ export function ThreadQueueSheet({ route }: StaticScreenProps<QueueTarget>) {
   const promote = useAtomCommand(threadEnvironment.promoteQueuedRun, "promote queued message");
   const cancel = useAtomCommand(threadEnvironment.cancelQueuedRun, "remove queued message");
   const resume = useAtomCommand(threadEnvironment.resumeThreadQueue, "resume queue");
+  const reorder = useAtomCommand(threadEnvironment.reorderQueuedRun, "move queued message");
   const [resuming, setResuming] = useState(false);
   const [busyRunId, setBusyRunId] = useState<RunId | null>(null);
   const busyRef = useRef(false);
-  const queuedRuns = workflow?.queuedRuns ?? [];
+  // The order a move produces, shown until the server's queue order changes or the move fails.
+  const [movedOrder, setMovedOrder] = useState<{
+    readonly serverOrder: string;
+    readonly order: ReadonlyArray<RunId>;
+  } | null>(null);
+  const [moveError, setMoveError] = useState<string | null>(null);
+  const serverQueuedRuns = workflow?.queuedRuns ?? [];
+  const serverOrder = serverQueuedRuns.map(({ run }) => run.id).join(" ");
+  const shownOrder = movedOrder?.serverOrder === serverOrder ? movedOrder.order : null;
+  const queuedRuns =
+    shownOrder === null
+      ? serverQueuedRuns
+      : [...serverQueuedRuns].sort(
+          (left, right) => shownOrder.indexOf(left.run.id) - shownOrder.indexOf(right.run.id),
+        );
 
   const hadQueuedRuns = useRef(queuedRuns.length > 0);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pops the navigator once the server-side queue empties after it had runs
@@ -177,6 +200,28 @@ export function ThreadQueueSheet({ route }: StaticScreenProps<QueueTarget>) {
         }),
       );
       navigation.goBack();
+      return;
+    }
+    if (action === "up" || action === "down") {
+      const runIds = queuedRuns.map(({ run }) => run.id);
+      const move = queuedRunMoveTarget(runIds, runId, action);
+      if (move === null) return;
+      void Haptics.selectionAsync();
+      setMoveError(null);
+      setMovedOrder({ serverOrder, order: applyQueuedRunMove(runIds, runId, move.beforeRunId) });
+      const result = await reorder({
+        ...target,
+        input: { threadId: target.threadId, runId, beforeRunId: move.beforeRunId },
+      });
+      if (result._tag === "Failure") {
+        setMovedOrder(null);
+        if (!isAtomCommandInterrupted(result)) {
+          const failure = squashAtomCommandFailure(result);
+          setMoveError(
+            failure instanceof Error ? failure.message : "Could not move the queued message.",
+          );
+        }
+      }
       return;
     }
     if (action !== "steer" && action !== "remove") return;
@@ -230,6 +275,15 @@ export function ThreadQueueSheet({ route }: StaticScreenProps<QueueTarget>) {
       {editBlockedReason !== null && queuedRuns.length > 0 ? (
         <Text className="py-3 text-sm text-foreground-muted">{editBlockedReason}</Text>
       ) : null}
+      {moveError !== null && queuedRuns.length > 0 ? (
+        <Text
+          accessibilityRole="alert"
+          accessibilityLiveRegion="polite"
+          className="py-3 text-sm text-danger-foreground"
+        >
+          {moveError}
+        </Text>
+      ) : null}
       {queuedRuns.length === 0 ? (
         <Text className="pt-6 text-center text-sm text-foreground-muted">
           No messages waiting in this queue.
@@ -243,6 +297,8 @@ export function ThreadQueueSheet({ route }: StaticScreenProps<QueueTarget>) {
           editBlocked: editBlockedReason !== null,
           isEditing: editing?.runId === run.id,
           isGuestMessage: context?.guest !== undefined,
+          position: index,
+          queuedCount: queuedRuns.length,
           text,
         });
         const title =
@@ -267,6 +323,22 @@ export function ThreadQueueSheet({ route }: StaticScreenProps<QueueTarget>) {
                             title: "Send now",
                             attributes: { disabled: !controls.canSend },
                             image: Platform.OS === "ios" ? "arrow.up" : "arrow_upward",
+                          },
+                        ]
+                      : []),
+                    ...(controls.showMove
+                      ? [
+                          {
+                            id: "up",
+                            title: "Move up",
+                            attributes: { disabled: !controls.canMoveUp },
+                            image: Platform.OS === "ios" ? "chevron.up" : "keyboard_arrow_up",
+                          },
+                          {
+                            id: "down",
+                            title: "Move down",
+                            attributes: { disabled: !controls.canMoveDown },
+                            image: Platform.OS === "ios" ? "chevron.down" : "keyboard_arrow_down",
                           },
                         ]
                       : []),
